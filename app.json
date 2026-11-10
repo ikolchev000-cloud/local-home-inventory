@@ -1,0 +1,45 @@
+{
+  "expo": {
+    "name": "Полка — домашние запасы",
+    "slug": "polka-home-inventory",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "scheme": "polka",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "backgroundColor": "#F7F8F4",
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.homeapp.polka"
+    },
+    "android": {
+      "package": "com.homeapp.polka",
+      "adaptiveIcon": {
+        "backgroundColor": "#DDF58A",
+        "foregroundImage": "./assets/android-icon-foreground.png",
+        "monochromeImage": "./assets/android-icon-monochrome.png"
+      },
+      "predictiveBackGestureEnabled": false
+    },
+    "web": {
+      "favicon": "./assets/favicon.png",
+      "bundler": "metro"
+    },
+    "plugins": [
+      "expo-router",
+      "expo-font",
+      "expo-status-bar",
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Разрешите «Полке» использовать камеру для считывания QR- и штрихкодов продуктов.",
+          "barcodeScannerEnabled": true,
+          "recordAudioAndroid": false
+        }
+      ]
+    ],
+    "experiments": {
+      "typedRoutes": true
+    }
+  }
+}
