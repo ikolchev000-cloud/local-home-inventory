@@ -1,0 +1,222 @@
+name: Android Release
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Опубликовать APK в GitHub Releases"
+        type: boolean
+        default: true
+
+concurrency:
+  group: android-release-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  actions: write
+
+env:
+  NODE_VERSION: "22"
+
+jobs:
+  prepare:
+    name: Подготовить версию и релиз
+    if: github.event_name != 'push' || github.ref_type != 'tag' || github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      tag: ${{ steps.meta.outputs.tag }}
+      apk-name: ${{ steps.meta.outputs.apk-name }}
+      publish: ${{ steps.meta.outputs.publish }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Resolve version
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION="$(node -p "require('./package.json').version")"
+          fi
+          TAG="v${VERSION}"
+          APK_NAME="local-home-inventory-${TAG}.apk"
+          if [[ "${{ github.event_name }}" == "push" ]] || [[ "${{ inputs.publish }}" == "true" ]]; then
+            PUBLISH=true
+          else
+            PUBLISH=false
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "apk-name=${APK_NAME}" >> "$GITHUB_OUTPUT"
+          echo "publish=${PUBLISH}" >> "$GITHUB_OUTPUT"
+          echo "Version ${VERSION}, tag ${TAG}, APK ${APK_NAME}, publish=${PUBLISH}"
+
+      - name: Ensure tag and draft release
+        if: steps.meta.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.meta.outputs.tag }}"
+          VERSION="${{ steps.meta.outputs.version }}"
+
+          git fetch origin --tags
+          if git rev-parse --verify "refs/tags/${TAG}" >/dev/null 2>&1; then
+            EXISTING_SHA="$(git rev-parse "refs/tags/${TAG}")"
+            if [[ "${EXISTING_SHA}" != "${GITHUB_SHA}" ]]; then
+              echo "::error::Tag ${TAG} уже указывает на другой коммит. Увеличьте version в package.json."
+              exit 1
+            fi
+            echo "Tag ${TAG} already exists for this commit"
+          else
+            git tag "${TAG}" "${GITHUB_SHA}"
+            git push origin "refs/tags/${TAG}"
+            echo "Created tag ${TAG}"
+          fi
+
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            IS_DRAFT="$(gh release view "${TAG}" --json isDraft -q .isDraft)"
+            if [[ "${IS_DRAFT}" != "true" ]]; then
+              echo "::error::Release ${TAG} уже опубликован. Для новой сборки увеличьте version в package.json."
+              exit 1
+            fi
+            echo "Draft release ${TAG} already exists"
+          else
+            gh release create "${TAG}" \
+              --title "Local Home Inventory ${VERSION}" \
+              --generate-notes \
+              --draft \
+              --verify-tag
+            echo "Created draft release ${TAG}"
+          fi
+
+  build-android:
+    name: Собрать Android APK
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      TAG: ${{ needs.prepare.outputs.tag }}
+      APK_NAME: ${{ needs.prepare.outputs.apk-name }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Sync app version
+        run: npm run version:sync
+
+      - name: Install Android SDK components
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDKMANAGER="$(find "${ANDROID_HOME}/cmdline-tools" -type f -path '*/bin/sdkmanager' | head -n1 || true)"
+          if [[ -n "${SDKMANAGER}" ]]; then
+            yes | "${SDKMANAGER}" --install "platforms;android-37" "build-tools;37.0.0" >/dev/null
+          fi
+
+      - name: Generate Android project
+        run: npx expo prebuild --platform android --clean --no-install
+
+      - name: Configure release signing
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: node scripts/configure-android-signing.mjs
+
+      - name: Build APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./gradlew --no-daemon :app:assembleRelease
+
+      - name: Prepare APK asset
+        shell: bash
+        run: |
+          set -euo pipefail
+          BUILT_APK="$(find android/app/build/outputs/apk/release -type f -name '*.apk' | head -n1)"
+          if [[ -z "${BUILT_APK}" ]]; then
+            echo "::error::APK file was not found."
+            exit 1
+          fi
+          cp "${BUILT_APK}" "${APK_NAME}"
+          APKSIGNER="$(find "${ANDROID_HOME}/build-tools" -type f -name apksigner | sort | tail -n1 || true)"
+          if [[ -n "${APKSIGNER}" ]]; then
+            "${APKSIGNER}" verify "${APK_NAME}"
+          fi
+          sha256sum "${APK_NAME}" | tee "${APK_NAME}.sha256"
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: local-home-inventory-android-${{ needs.prepare.outputs.tag }}
+          path: |
+            ${{ env.APK_NAME }}
+            ${{ env.APK_NAME }}.sha256
+          if-no-files-found: error
+
+      - name: Upload APK to release
+        if: needs.prepare.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release upload "${TAG}" "${APK_NAME}" "${APK_NAME}.sha256" --clobber
+
+  publish-release:
+    name: Опубликовать релиз
+    needs: [prepare, build-android]
+    if: needs.prepare.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release edit "${TAG}" --repo "${GH_REPO}" --draft=false --latest
+          echo "Published ${TAG}"
