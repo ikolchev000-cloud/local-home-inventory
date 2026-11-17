@@ -98,6 +98,29 @@ npm run web
 npm run android
 ```
 
+## Автоматическая сборка APK
+
+Workflow `.github/workflows/release-android.yml` запускается при push в `main`, при push тега `v*` и вручную из вкладки Actions.
+
+Что происходит при сборке:
+
+1. Версия читается из `package.json`.
+2. GitHub Actions создаёт тег вида `vX.Y.Z` и черновой релиз.
+3. Через `expo prebuild` и Gradle собирается Android APK.
+4. APK и SHA-256 загружаются в артефакты workflow.
+5. После успешной сборки черновой релиз публикуется, а APK появляется в разделе Releases.
+
+Чтобы выпустить новую версию, увеличьте значение `version` в `package.json` и отправьте изменения в `main`. Опубликованный релиз с тем же номером версии повторно не перезаписывается.
+
+По умолчанию APK подписывается встроенным debug-ключом шаблона Expo и подходит для внутреннего распространения. Для постоянного production-подписания добавьте в GitHub Secrets:
+
+- `ANDROID_KEYSTORE_BASE64`
+- `ANDROID_KEYSTORE_PASSWORD`
+- `ANDROID_KEY_ALIAS`
+- `ANDROID_KEY_PASSWORD`
+
+Если эти secrets заданы, workflow автоматически использует их для подписания release-сборки.
+
 ## Проверка качества
 
 ```bash
@@ -123,8 +146,13 @@ src/
   data/                Справочники категорий, мест и единиц
   types/               Типы предметной области
   utils/               Даты, аналитика, запасы и поиск продуктов
+scripts/
+  sync-version.mjs                 Синхронизация версии app.json с package.json
+  configure-android-signing.mjs    Настройка release-подписания на CI
+.github/
+  workflows/         GitHub Actions
 assets/
-  screenshots/         Изображения для README
+  screenshots/       Изображения для README
 ```
 
 Основной поток сканирования:
